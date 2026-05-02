@@ -1,0 +1,17 @@
+{
+  "llamaUrl": "http://127.0.0.1:8080",
+  "localProviderId": "openai-compatible-local",
+  "heavyTools": ["generate_video", "generate_image", "train_lora", "mock_heavy_tool"],
+  "commands": {
+    "start": {
+      "linux": "bash /opt/llama/start_llama.sh",
+      "darwin": "sh /Users/Shared/llama/start_llama.sh",
+      "win32": "start.bat"
+    },
+    "stop": {
+      "linux": "pkill -f llama-server",
+      "darwin": "pkill -f llama-server",
+      "win32": "taskkill /F /IM llama-server.exe"
+    }
+  }
+}
