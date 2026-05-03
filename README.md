@@ -19,9 +19,9 @@ npm install async-mutex
 
 ## Configuration
 
-Place `vram-config.json` in the root of your OpenClaw workspace (next to `package.json`). This keeps your hardware configuration decoupled from the source code.
+Place `resource-guard-config.json` in the root of your OpenClaw workspace (next to `package.json`). This keeps your hardware configuration decoupled from the source code.
 
-Example `vram-config.json`:
+Example `resource-guard-config.json`:
 
 ```json
 {

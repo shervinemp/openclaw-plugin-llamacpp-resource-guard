@@ -25,11 +25,11 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 // ---------------------------------------------------------
 let CONFIG: any = {};
 try {
-  const configPath = path.resolve(process.cwd(), "vram-config.json");
+  const configPath = path.resolve(process.cwd(), "resource-guard-config.json");
   const rawData = fs.readFileSync(configPath, "utf-8");
   CONFIG = JSON.parse(rawData);
 } catch (error) {
-  console.error("[VRAM] Failed to load vram-config.json! Make sure it exists in the workspace root.");
+  console.error("[VRAM] Failed to load resource-guard-config.json! Make sure it exists in the workspace root.");
   process.exit(1);
 }
 
