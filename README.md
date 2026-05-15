@@ -114,4 +114,8 @@ Get-Content -Path "$env:TEMP\vram-plugin-test.log" -Wait  # PowerShell
   ```
 - The plugin reads the config file once at module load. Changes to `resource-guard-config.json` require a gateway restart: `openclaw gateway restart`
 - Plugin-registered tools (like `mock_heavy_tool`) need `contracts.tools` in `openclaw.plugin.json` and `tools.allow` in config to surface to the agent
-- The slot save/restore uses llama.cpp's `/slots` API endpoints. The server must support these (standard in recent builds)
+- **Slot save/restore** requires `llama-server` to be started with `--slot-save-path <dir>`. Without it, `POST /slots/{id}?action=save` returns 501. Add it to your server arguments:
+  ```
+  --slot-save-path /tmp/llama_slots_backup
+  ```
+  The plugin saves slots to a temp directory and restores them after the LLM reboots. Without this flag, the plugin will still kill and restart the server correctly — it just won't be able to preserve the KV cache across the restart.

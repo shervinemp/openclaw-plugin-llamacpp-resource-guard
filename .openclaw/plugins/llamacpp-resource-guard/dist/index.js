@@ -97,9 +97,10 @@ export default definePluginEntry({
           const slots = await res.json();
           savedSlotIds = [];
           for (const slot of slots) {
-            if (slot.n_past > 0) {
+            const tokenCount = slot.next_token?.n_decoded || slot.n_past || 0;
+          if (tokenCount > 0) {
               const filepath = path.join(SLOTS_DIR, `slot_${slot.id}.bin`);
-              console.info(`[VRAM] Saving Slot ${slot.id} (${slot.n_past} tokens)...`);
+              LOG(`[VRAM] Saving Slot ${slot.id} (${tokenCount} tokens)...`);
               await fetch(`${CONFIG.llamaUrl}/slots/${slot.id}?action=save&filepath=${filepath}`, { method: 'POST' });
               savedSlotIds.push(slot.id);
             }
