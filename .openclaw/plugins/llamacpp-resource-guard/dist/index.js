@@ -1,5 +1,5 @@
 import { Mutex } from "async-mutex";
-import { exec, spawn, execSync } from "child_process";
+import { exec } from "child_process";
 import { promisify } from "util";
 import * as fs from "fs";
 import * as path from "path";
@@ -8,15 +8,10 @@ import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { fileURLToPath } from "url";
 
 const execAsync = promisify(exec);
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-function startLLM(command: string) {
-  const child = spawn(command, [], { shell: true, detached: true, stdio: "ignore" });
-  child.unref();
-}
-
-let CONFIG: any = {};
+let CONFIG = {};
 try {
   const configPath = path.resolve(__dirname, "..", "resource-guard-config.json");
   const rawData = fs.readFileSync(configPath, "utf-8");
@@ -31,19 +26,16 @@ if (!fs.existsSync(SLOTS_DIR)) {
   fs.mkdirSync(SLOTS_DIR, { recursive: true });
 }
 
-const platform = process.platform as "win32" | "darwin" | "linux";
+const platform = process.platform;
 const CMD_START = CONFIG.commands.start[platform] || CONFIG.commands.start["linux"];
 const CMD_STOP = CONFIG.commands.stop[platform] || CONFIG.commands.stop["linux"];
 
-let gpuState: "IDLE" | "DRAINING" | "LOCKED" = "IDLE";
+let gpuState = "IDLE";
 let activeLocalGenerations = 0;
-let savedSlotIds: number[] = [];
+let savedSlotIds = [];
 
 const orchestrationMutex = new Mutex();
-const activeToolLocks = new Map<string, () => void>();
-
-const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
-const LOG = (msg: string) => fs.appendFileSync(LOG_FILE, msg + "\n");
+const activeToolLocks = new Map();
 
 export default definePluginEntry({
   id: "llamacpp-resource-guard",
@@ -55,31 +47,29 @@ export default definePluginEntry({
     properties: {}
   },
   register(api) {
-    api.on("model_call_started", (event: any) => {
+    api.on("model_call_started", (event) => {
       if (event.provider === CONFIG.localProviderId) {
         activeLocalGenerations++;
-        LOG(`[VRAM] model_call_started: activeLocalGenerations=${activeLocalGenerations}`);
       }
     });
 
-    api.on("model_call_ended", (event: any) => {
+    api.on("model_call_ended", (event) => {
       if (event.provider === CONFIG.localProviderId) {
         activeLocalGenerations = Math.max(0, activeLocalGenerations - 1);
-        LOG(`[VRAM] model_call_ended: activeLocalGenerations=${activeLocalGenerations}`);
       }
     });
 
-    api.on("before_model_resolve", async (event: any, ctx: any) => {
+    api.on("before_model_resolve", async (event, ctx) => {
       if (ctx.modelProviderId !== CONFIG.localProviderId) return;
       if (gpuState !== "IDLE") {
-        LOG(`[VRAM] Gatekeeper paused run ${ctx.runId}. Waiting for GPU...`);
+        console.info(`[VRAM] Gatekeeper paused run ${ctx.runId}. Waiting for GPU...`);
         while (gpuState !== "IDLE") {
           await sleep(100);
         }
       }
     }, { priority: 100 });
 
-    api.on("before_tool_call", async (event: any, ctx: any) => {
+    api.on("before_tool_call", async (event, ctx) => {
       if (!CONFIG.heavyTools.includes(event.toolName)) return;
 
       const releaseMutex = await orchestrationMutex.acquire();
@@ -91,7 +81,7 @@ export default definePluginEntry({
         return;
       }
 
-      LOG(`[VRAM] Heavy tool queued. State -> DRAINING. activeLocalGenerations=${activeLocalGenerations}`);
+      console.info(`[VRAM] Heavy tool queued. State -> DRAINING.`);
       gpuState = "DRAINING";
 
       while (activeLocalGenerations > 0) {
@@ -99,7 +89,7 @@ export default definePluginEntry({
       }
 
       gpuState = "LOCKED";
-      LOG(`[VRAM] GPU drained. State -> LOCKED. Saving active context slots...`);
+      console.info(`[VRAM] GPU drained. State -> LOCKED. Saving active context slots...`);
 
       try {
         const res = await fetch(`${CONFIG.llamaUrl}/slots`);
@@ -109,46 +99,32 @@ export default definePluginEntry({
           for (const slot of slots) {
             if (slot.n_past > 0) {
               const filepath = path.join(SLOTS_DIR, `slot_${slot.id}.bin`);
-              LOG(`[VRAM] Saving Slot ${slot.id} (${slot.n_past} tokens)...`);
+              console.info(`[VRAM] Saving Slot ${slot.id} (${slot.n_past} tokens)...`);
               await fetch(`${CONFIG.llamaUrl}/slots/${slot.id}?action=save&filepath=${filepath}`, { method: 'POST' });
               savedSlotIds.push(slot.id);
             }
           }
         }
-      } catch (e: any) {
-        LOG(`[VRAM] Warning: Could not reach Llama server to save slots: ${e.message}`);
+      } catch (e) {
+        console.warn(`[VRAM] Warning: Could not reach Llama server to save slots.`);
       }
 
-      LOG(`[VRAM] Killing local LLM process...`);
+      console.info(`[VRAM] Killing local LLM process...`);
       try {
         await execAsync(CMD_STOP);
-        LOG(`[VRAM] llama-server stopped successfully.`);
-      } catch (e: any) {
-        LOG(`[VRAM] Stop command result: ${e.message}`);
+      } catch (e) {
+        console.warn(`[VRAM] Warning: Stop command returned an error.`);
       }
     }, { priority: 100 });
 
-    api.on("after_tool_call", async (event: any, ctx: any) => {
+    api.on("after_tool_call", async (event, ctx) => {
       if (!CONFIG.heavyTools.includes(event.toolName)) return;
 
-      LOG(`[VRAM] Tool finished. Rebooting local LLM (detached)...`);
-      startLLM(CMD_START);
-      LOG(`[VRAM] Start command issued.`);
+      console.info(`[VRAM] Tool finished. Rebooting local LLM...`);
+      await execAsync(CMD_START);
 
-      const MAX_POLL_WITH_PROCESS = 300;
-      const MAX_POLL_WITHOUT_PROCESS = 3;
       let isHealthy = false;
-      for (let i = 0; i < MAX_POLL_WITH_PROCESS; i++) {
-        const processAlive = (() => {
-          try {
-            const out = execSync('tasklist /NH /FI "IMAGENAME eq llama-server.exe"', { encoding: "utf8", timeout: 2000 });
-            return out.includes("llama-server.exe");
-          } catch (e) { return false; }
-        })();
-        if (!processAlive && i >= MAX_POLL_WITHOUT_PROCESS) {
-          LOG(`[VRAM] Process not found after ${i}s, aborting poll.`);
-          break;
-        }
+      for (let i = 0; i < 30; i++) {
         try {
           const res = await fetch(`${CONFIG.llamaUrl}/health`);
           if (res.ok) { isHealthy = true; break; }
@@ -157,19 +133,16 @@ export default definePluginEntry({
       }
 
       if (!isHealthy) {
-        LOG(`[VRAM] CRITICAL: LLM failed to boot (process was ${isHealthy ? "running" : "dead"} after poll).`);
-      } else {
-        LOG(`[VRAM] LLM online (healthy).`);
-        if (savedSlotIds.length > 0) {
-          LOG(`[VRAM] Restoring ${savedSlotIds.length} context slots...`);
-          for (const id of savedSlotIds) {
-            const filepath = path.join(SLOTS_DIR, `slot_${id}.bin`);
-            try {
-              await fetch(`${CONFIG.llamaUrl}/slots/${id}?action=restore&filepath=${filepath}`, { method: 'POST' });
-              LOG(`[VRAM] Restored Slot ${id}`);
-            } catch (e: any) {
-              LOG(`[VRAM] Failed to restore Slot ${id}: ${e.message}`);
-            }
+        console.error(`[VRAM] CRITICAL: LLM failed to boot after 30 seconds!`);
+      } else if (savedSlotIds.length > 0) {
+        console.info(`[VRAM] LLM online. Restoring ${savedSlotIds.length} context slots...`);
+        for (const id of savedSlotIds) {
+          const filepath = path.join(SLOTS_DIR, `slot_${id}.bin`);
+          try {
+            await fetch(`${CONFIG.llamaUrl}/slots/${id}?action=restore&filepath=${filepath}`, { method: 'POST' });
+            console.info(`[VRAM] Restored Slot ${id}`);
+          } catch (e) {
+            console.warn(`[VRAM] Failed to restore Slot ${id}`);
           }
         }
       }
@@ -179,12 +152,12 @@ export default definePluginEntry({
 
       const executionId = event.toolCallId || ctx.toolCallId;
       if (executionId && activeToolLocks.has(executionId)) {
-        const releaseMutex = activeToolLocks.get(executionId)!;
+        const releaseMutex = activeToolLocks.get(executionId);
         releaseMutex();
         activeToolLocks.delete(executionId);
       }
 
-      LOG(`[VRAM] Swap complete. Local agents unpaused. state=IDLE`);
+      console.info(`[VRAM] Swap complete. Local agents unpaused.`);
     }, { priority: 100 });
   }
 });

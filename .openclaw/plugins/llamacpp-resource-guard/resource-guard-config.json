@@ -1,12 +1,12 @@
 {
-  "llamaUrl": "http://127.0.0.1:8080",
-  "localProviderId": "openai-compatible-local",
-  "heavyTools": ["generate_video", "generate_image", "train_lora", "mock_heavy_tool"],
+  "llamaUrl": "http://127.0.0.1:9000",
+  "localProviderId": "local-ai",
+  "heavyTools": ["generate_video", "generate_image"],
   "commands": {
     "start": {
-      "linux": "bash /opt/llama/start_llama.sh",
-      "darwin": "sh /Users/Shared/llama/start_llama.sh",
-      "win32": "start.bat"
+      "linux": "./start_llama.sh",
+      "darwin": "./start_llama.sh",
+      "win32": "cmd /c start /B powershell -File start_llama.ps1"
     },
     "stop": {
       "linux": "pkill -f llama-server",

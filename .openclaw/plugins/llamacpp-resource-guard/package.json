@@ -1,5 +1,22 @@
 {
+  "name": "@shervinemp/openclaw-llamacpp-resource-guard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Llama.cpp VRAM resource guard plugin for OpenClaw",
+  "type": "module",
   "dependencies": {
     "async-mutex": "^0.5.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2",
+      "minGatewayVersion": "2026.3.24-beta.2"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0"
   }
 }

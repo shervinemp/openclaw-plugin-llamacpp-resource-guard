@@ -1,0 +1,19 @@
+{
+  "id": "llamacpp-resource-guard",
+  "activation": {
+    "onStartup": true
+  },
+  "name": "Llama.cpp Resource Guard",
+  "description": "Pauses local llama.cpp generation, saves KV cache slots, and frees VRAM when heavy tools are invoked.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Llama.cpp Resource Guard",
+      "help": "Automatically pauses local LLM inference and frees VRAM before running heavy GPU tools."
+    }
+  }
+}
