@@ -5,6 +5,9 @@
   },
   "name": "Llama.cpp Resource Guard",
   "description": "Pauses local llama.cpp generation, saves KV cache slots, and frees VRAM when heavy tools are invoked.",
+  "contracts": {
+    "tools": ["mock_heavy_tool"]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

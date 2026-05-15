@@ -47,6 +47,17 @@ export default definePluginEntry({
     properties: {}
   },
   register(api) {
+    api.registerTool({
+      name: "mock_heavy_tool",
+      description: "Simulates a heavy GPU workload (5s delay) for testing the VRAM resource guard plugin.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      async execute(_id, _params) {
+        const start = Date.now();
+        await sleep(5000);
+        return { content: [{ type: "text", text: `mock_heavy_tool completed in ${Date.now() - start}ms` }] };
+      },
+    });
+
     api.on("model_call_started", (event) => {
       if (event.provider === CONFIG.localProviderId) {
         activeLocalGenerations++;

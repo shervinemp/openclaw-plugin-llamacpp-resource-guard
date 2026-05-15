@@ -102,8 +102,8 @@ Get-Content "$env:TEMP\vram-plugin-test.log" -Wait    # PowerShell
   }
   ```
 - Config is read once at module load. Changes to `resource-guard-config.json` need `openclaw gateway restart`.
-- **KV slot save/restore** requires `llama-server` started with `--slot-save-path <dir>`:
+- **KV slot save/restore** is optional. Without `--slot-save-path` on `llama-server`, the save endpoint returns 501 and the plugin skips it. With the flag:
   ```
   --slot-save-path /tmp/llama_slots_backup
   ```
-  Without this flag, the cycle still works — the server is killed and restarted correctly — but the KV cache won't be preserved across the restart.
+  Note: SWA/hybrid models (Qwen3 MoE, Gemma2) invalidate KV cache on save as of `llama.cpp` b9037 — prompt is always re-processed. Save/restore works best on dense decoder-only models (Llama, Mistral).
