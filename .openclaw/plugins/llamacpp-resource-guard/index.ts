@@ -55,6 +55,27 @@ export default definePluginEntry({
     properties: {}
   },
   register(api) {
+    // Auto-start model on OpenClaw boot
+    LOG(`[VRAM] OpenClaw starting. Auto-starting llama-server...`);
+    startLLM(CMD_START);
+
+    // Auto-stop model on OpenClaw shutdown
+    let hasShutDown = false;
+    const shutdownModel = () => {
+      if (hasShutDown) return;
+      hasShutDown = true;
+      LOG(`[VRAM] OpenClaw shutting down. Killing llama-server...`);
+      try {
+        execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
+        LOG(`[VRAM] llama-server stopped successfully on exit.`);
+      } catch (e: any) {
+        LOG(`[VRAM] Stop command result on exit: ${e.message}`);
+      }
+    };
+    process.once("SIGINT", () => process.exit(0));
+    process.once("SIGTERM", () => process.exit(0));
+    process.on("exit", shutdownModel);
+
     api.on("model_call_started", (event: any) => {
       if (event.provider === CONFIG.localProviderId) {
         activeLocalGenerations++;
@@ -73,7 +94,7 @@ export default definePluginEntry({
       if (ctx.modelProviderId !== CONFIG.localProviderId) return;
       if (gpuState !== "IDLE") {
         LOG(`[VRAM] Gatekeeper paused run ${ctx.runId}. Waiting for GPU...`);
-        while (gpuState !== "IDLE") {
+        while ((gpuState as string) !== "IDLE") {
           await sleep(100);
         }
       }
