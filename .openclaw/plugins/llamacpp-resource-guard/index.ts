@@ -16,6 +16,17 @@ function startLLM(command: string) {
   child.unref();
 }
 
+function isProcessAlive(processName: string): boolean {
+  try {
+    if (process.platform === "win32") {
+      const out = execSync(`tasklist /NH /FI "IMAGENAME eq ${processName}"`, { encoding: "utf8", timeout: 2000 });
+      return out.includes(processName);
+    }
+    const out = execSync(`pgrep -f "${processName}"`, { encoding: "utf8", timeout: 2000 });
+    return out.trim().length > 0;
+  } catch { return false; }
+}
+
 let CONFIG: any = {};
 try {
   const configPath = path.resolve(__dirname, "..", "resource-guard-config.json");
@@ -55,6 +66,37 @@ export default definePluginEntry({
     properties: {}
   },
   register(api) {
+    // Auto-start model on OpenClaw boot
+    LOG(`[VRAM] OpenClaw starting. Auto-starting llama-server...`);
+    startLLM(CMD_START);
+    (async () => {
+      for (let i = 0; i < 30; i++) {
+        try {
+          const res = await fetch(`${CONFIG.llamaUrl}/health`);
+          if (res.ok) { LOG(`[VRAM] llama-server is healthy after ${i + 1}s.`); return; }
+        } catch {}
+        await sleep(1000);
+      }
+      LOG(`[VRAM] WARNING: llama-server not healthy after 30s. Check your start command.`);
+    })();
+
+    // Auto-stop model on OpenClaw shutdown
+    let hasShutDown = false;
+    const shutdownModel = () => {
+      if (hasShutDown) return;
+      hasShutDown = true;
+      LOG(`[VRAM] OpenClaw shutting down. Killing llama-server...`);
+      try {
+        execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
+        LOG(`[VRAM] llama-server stopped successfully on exit.`);
+      } catch (e: any) {
+        LOG(`[VRAM] Stop command result on exit: ${e.message}`);
+      }
+    };
+    process.once("SIGINT", () => process.exit(0));
+    process.once("SIGTERM", () => process.exit(0));
+    process.on("exit", shutdownModel);
+
     api.on("model_call_started", (event: any) => {
       if (event.provider === CONFIG.localProviderId) {
         activeLocalGenerations++;
@@ -73,7 +115,7 @@ export default definePluginEntry({
       if (ctx.modelProviderId !== CONFIG.localProviderId) return;
       if (gpuState !== "IDLE") {
         LOG(`[VRAM] Gatekeeper paused run ${ctx.runId}. Waiting for GPU...`);
-        while (gpuState !== "IDLE") {
+        while ((gpuState as string) !== "IDLE") {
           await sleep(100);
         }
       }
@@ -136,17 +178,11 @@ export default definePluginEntry({
       startLLM(CMD_START);
       LOG(`[VRAM] Start command issued.`);
 
-      const MAX_POLL_WITH_PROCESS = 300;
-      const MAX_POLL_WITHOUT_PROCESS = 3;
+      const MAX_POLL = 60;
+      const MAX_POLL_WITHOUT_PROCESS = 5;
       let isHealthy = false;
-      for (let i = 0; i < MAX_POLL_WITH_PROCESS; i++) {
-        const processAlive = (() => {
-          try {
-            const out = execSync('tasklist /NH /FI "IMAGENAME eq llama-server.exe"', { encoding: "utf8", timeout: 2000 });
-            return out.includes("llama-server.exe");
-          } catch (e) { return false; }
-        })();
-        if (!processAlive && i >= MAX_POLL_WITHOUT_PROCESS) {
+      for (let i = 0; i < MAX_POLL; i++) {
+        if (!isProcessAlive("llama-server") && i >= MAX_POLL_WITHOUT_PROCESS) {
           LOG(`[VRAM] Process not found after ${i}s, aborting poll.`);
           break;
         }
@@ -158,7 +194,7 @@ export default definePluginEntry({
       }
 
       if (!isHealthy) {
-        LOG(`[VRAM] CRITICAL: LLM failed to boot (process was ${isHealthy ? "running" : "dead"} after poll).`);
+        LOG(`[VRAM] CRITICAL: LLM failed to boot after 60s.`);
       } else {
         LOG(`[VRAM] LLM online (healthy).`);
         if (savedSlotIds.length > 0) {
