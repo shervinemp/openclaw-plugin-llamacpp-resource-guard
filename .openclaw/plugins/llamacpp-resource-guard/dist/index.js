@@ -36,16 +36,19 @@ async function fetchWithCheck(url, options = {}) {
     }
     return res;
 }
+const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
+const LOG = (msg) => fs.appendFileSync(LOG_FILE, msg + "\n");
 function startLLM(command) {
     if (isProcessAlive("llama-server")) {
-        console.log(`[VRAM] llama-server is already running, skipping start.`);
-        return;
+        LOG(`[VRAM] llama-server is already running, skipping start.`);
+        return false;
     }
     const child = spawn(command, [], { shell: true, detached: true, stdio: "ignore" });
     child.on("error", (err) => {
-        console.error(`[VRAM] Failed to spawn llama-server: ${err.message}`);
+        LOG(`[VRAM] Failed to spawn llama-server: ${err.message}`);
     });
     child.unref();
+    return true;
 }
 function isProcessAlive(processName) {
     try {
@@ -117,8 +120,6 @@ let activeLocalGenerations = 0;
 let savedSlotIds = [];
 const orchestrationMutex = new Mutex();
 const activeToolLocks = new Map();
-const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
-const LOG = (msg) => fs.appendFileSync(LOG_FILE, msg + "\n");
 const MUTEX_TIMEOUT = 120_000; // max time a tool can hold the mutex (watchdog)
 const GENERATION_DRAIN_TIMEOUT = 60_000; // max time to wait for generations to finish
 // --- Plugin entry ---
@@ -287,9 +288,10 @@ export default definePluginEntry({
         api.on("after_tool_call", async (event, ctx) => {
             if (!CONFIG.heavyTools.includes(event.toolName))
                 return;
-            LOG(`[VRAM] Tool finished. Rebooting local LLM (detached)...`);
-            startLLM(CMD_START);
-            LOG(`[VRAM] Start command issued.`);
+            LOG(`[VRAM] Tool finished. Rebooting local LLM...`);
+            if (startLLM(CMD_START)) {
+                LOG(`[VRAM] Start command issued.`);
+            }
             const MAX_POLL = 60;
             const MAX_POLL_WITHOUT_PROCESS = 5;
             let isHealthy = false;

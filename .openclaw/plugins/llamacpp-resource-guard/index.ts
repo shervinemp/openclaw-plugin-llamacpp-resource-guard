@@ -24,12 +24,6 @@ interface Config {
   };
 }
 
-interface SlotInfo {
-  id: number;
-  next_token?: { n_decoded?: number };
-  n_past?: number;
-}
-
 // --- Helpers ---
 
 class FetchError extends Error {
@@ -66,16 +60,20 @@ async function fetchWithCheck(
   return res;
 }
 
-function startLLM(command: string): void {
+const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
+const LOG = (msg: string) => fs.appendFileSync(LOG_FILE, msg + "\n");
+
+function startLLM(command: string): boolean {
   if (isProcessAlive("llama-server")) {
-    console.log(`[VRAM] llama-server is already running, skipping start.`);
-    return;
+    LOG(`[VRAM] llama-server is already running, skipping start.`);
+    return false;
   }
   const child = spawn(command, [], { shell: true, detached: true, stdio: "ignore" });
   child.on("error", (err: Error) => {
-    console.error(`[VRAM] Failed to spawn llama-server: ${err.message}`);
+    LOG(`[VRAM] Failed to spawn llama-server: ${err.message}`);
   });
   child.unref();
+  return true;
 }
 
 function isProcessAlive(processName: string): boolean {
@@ -101,7 +99,7 @@ function loadConfig(): Config {
     const rawData = fs.readFileSync(configPath, "utf-8");
     return JSON.parse(rawData) as Config;
   } catch (error) {
-    console.error(`[VRAM] Failed to load config from ${configPath}`);
+    LOG(`[VRAM] Failed to load config from ${configPath}`);
     process.exit(1);
   }
 }
@@ -157,9 +155,6 @@ let savedSlotIds: number[] = [];
 
 const orchestrationMutex = new Mutex();
 const activeToolLocks = new Map<string, () => void>();
-
-const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
-const LOG = (msg: string) => fs.appendFileSync(LOG_FILE, msg + "\n");
 
 const MUTEX_TIMEOUT = 120_000; // max time a tool can hold the mutex (watchdog)
 const GENERATION_DRAIN_TIMEOUT = 60_000; // max time to wait for generations to finish
@@ -366,9 +361,10 @@ export default definePluginEntry({
       async (event: any, ctx: any) => {
         if (!CONFIG.heavyTools.includes(event.toolName)) return;
 
-        LOG(`[VRAM] Tool finished. Rebooting local LLM (detached)...`);
-        startLLM(CMD_START);
-        LOG(`[VRAM] Start command issued.`);
+        LOG(`[VRAM] Tool finished. Rebooting local LLM...`);
+        if (startLLM(CMD_START)) {
+          LOG(`[VRAM] Start command issued.`);
+        }
 
         const MAX_POLL = 60;
         const MAX_POLL_WITHOUT_PROCESS = 5;
