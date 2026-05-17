@@ -38,12 +38,24 @@ async function fetchWithCheck(url, options = {}) {
 }
 const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
 const LOG = (msg) => fs.appendFileSync(LOG_FILE, msg + "\n");
-function startLLM(command, force = false) {
-    if (!force && isProcessAlive("llama-server")) {
+function startLLM(command) {
+    if (isProcessAlive("llama-server")) {
         LOG(`[VRAM] llama-server is already running, skipping start.`);
         return false;
     }
-    const child = spawn(command, [], { shell: true, detached: true, stdio: "ignore" });
+    let cwd;
+    if (process.platform === "win32") {
+        const parts = command.match(/(?:"[^"]*"|'[^']*'|\S+)/g);
+        if (parts) {
+            for (const part of parts) {
+                const cleaned = part.replace(/^["']|["']$/g, "");
+                if (/\.ps1$/i.test(cleaned)) {
+                    cwd = path.dirname(cleaned);
+                }
+            }
+        }
+    }
+    const child = spawn(command, [], { shell: true, detached: true, stdio: "ignore", cwd });
     child.on("error", (err) => {
         LOG(`[VRAM] Failed to spawn llama-server: ${err.message}`);
     });
@@ -133,7 +145,6 @@ export default definePluginEntry({
         properties: {},
     },
     register(api) {
-        // Boot: ensure clean slate — kill orphaned server from previous crash, then start fresh
         const shutdownModel = () => {
             LOG(`[VRAM] OpenClaw shutting down. Killing llama-server...`);
             try {
@@ -144,28 +155,10 @@ export default definePluginEntry({
                 LOG(`[VRAM] Stop command result on exit: ${e.message}`);
             }
         };
-        const bootServer = async () => {
-            // If a server is already running and healthy, keep it
-            try {
-                const res = await fetchWithTimeout(`${CONFIG.llamaUrl}/health`, { timeout: 2000 });
-                if (res.ok) {
-                    LOG(`[VRAM] Existing llama-server is healthy, keeping it.`);
-                    return;
-                }
-            }
-            catch {
-                // no running server or unresponsive
-            }
-            // Kill any orphaned process from a previous crash
-            if (isProcessAlive("llama-server")) {
-                LOG(`[VRAM] Found unresponsive llama-server process, killing it...`);
-                try {
-                    execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
-                }
-                catch { }
-            }
-            LOG(`[VRAM] Starting llama-server...`);
-            startLLM(CMD_START, true);
+        // Start server (spawn checks if already running)
+        LOG(`[VRAM] Starting llama-server...`);
+        startLLM(CMD_START);
+        (async () => {
             for (let i = 0; i < 30; i++) {
                 try {
                     const res = await fetchWithTimeout(`${CONFIG.llamaUrl}/health`, { timeout: 2000 });
@@ -174,15 +167,12 @@ export default definePluginEntry({
                         return;
                     }
                 }
-                catch {
-                    // not ready yet
-                }
+                catch { }
                 await sleep(1000);
             }
             LOG(`[VRAM] WARNING: llama-server not healthy after 30s. Check your start command.`);
-        };
-        bootServer();
-        // Shutdown: clean up via OpenClaw lifecycle hooks
+        })();
+        // Clean shutdown
         process.on("exit", shutdownModel);
         api.on("gateway_stop", async () => {
             shutdownModel();
