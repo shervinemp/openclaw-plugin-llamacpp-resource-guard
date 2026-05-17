@@ -53,8 +53,8 @@ Edit `resource-guard-config.json` in the plugin root:
   "heavyTools": ["generate_video", "generate_image"],
   "commands": {
     "start": {
-      "linux": "./start_llama.sh",
-      "darwin": "./start_llama.sh",
+      "linux": "bash ./start_llama.sh",
+      "darwin": "bash ./start_llama.sh",
       "win32": "cmd /c start /B powershell -File start_llama.ps1"
     },
     "stop": {
