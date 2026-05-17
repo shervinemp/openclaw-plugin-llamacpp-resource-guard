@@ -18,6 +18,7 @@ interface Config {
   llamaUrl: string;
   localProviderId: string;
   heavyTools: string[];
+  cwd?: Record<string, string>;
   commands: {
     start: Record<string, string>;
     stop: Record<string, string>;
@@ -69,20 +70,12 @@ function startLLM(command: string): boolean {
     return false;
   }
 
-  let cwd: string | undefined;
-  if (process.platform === "win32") {
-    const parts = command.match(/(?:"[^"]*"|'[^']*'|\S+)/g);
-    if (parts) {
-      for (const part of parts) {
-        const cleaned = part.replace(/^["']|["']$/g, "");
-        if (/\.ps1$/i.test(cleaned)) {
-          cwd = path.dirname(cleaned);
-        }
-      }
-    }
-  }
-
-  const child = spawn(command, [], { shell: true, detached: true, stdio: "ignore", cwd });
+  const child = spawn(command, [], {
+    shell: true,
+    detached: true,
+    stdio: "ignore",
+    cwd: CONFIG.cwd?.[process.platform],
+  });
   child.on("error", (err: Error) => {
     LOG(`[VRAM] Failed to spawn llama-server: ${err.message}`);
   });

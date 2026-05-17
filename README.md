@@ -4,7 +4,7 @@ Pauses local `llama.cpp` inference, saves KV context slots, and frees VRAM when 
 
 ## How It Works
 
-Five hooks orchestrate the full cycle:
+Hooks orchestrate the full cycle:
 
 | Hook | Role |
 |------|------|
@@ -13,27 +13,32 @@ Five hooks orchestrate the full cycle:
 | `before_model_resolve` | Gates new local calls during an active drain |
 | `before_tool_call` | Drains GPU, saves KV slots, kills `llama-server` |
 | `after_tool_call` | Restarts `llama-server`, polls health, restores slots |
+| `gateway_stop` | Kills `llama-server` on gateway shutdown |
 
 **Cycle:**
 
+0. **On gateway start**, plugin spawns `llama-server` (or reuses an existing healthy one)
 1. Agent calls a tool in `heavyTools`
 2. Plugin waits for active generations to finish, saves KV slots, kills the server
 3. Heavy tool runs with VRAM free'd up
 4. Plugin spawns the restart command (detached)
 5. Polls `/health` — if `llama-server` is alive, up to **60s**; if dead, bails after **5s**
 6. Once healthy, restores saved slots and unpauses local agents
+7. **On gateway stop**, plugin kills `llama-server`
 
 ## Installation
 
 ```bash
-openclaw plugins install <path-to-plugin-root>
+openclaw plugins install --dangerously-force-unsafe-install <path-to-plugin-root>
 ```
 
 For development, use a symlink:
 
 ```bash
-openclaw plugins install --link <path-to-plugin-root>
+openclaw plugins install --link --dangerously-force-unsafe-install <path-to-plugin-root>
 ```
+
+> The `--dangerously-force-unsafe-install` flag is required because the plugin uses `child_process` to manage the `llama-server` lifecycle.
 
 Verify the plugin loaded:
 
@@ -51,11 +56,14 @@ Edit `resource-guard-config.json` in the plugin root:
   "llamaUrl": "http://127.0.0.1:9000",
   "localProviderId": "local-ai",
   "heavyTools": ["generate_video", "generate_image"],
+  "cwd": {
+    "win32": "C:\\llama"
+  },
   "commands": {
     "start": {
       "linux": "bash ./start_llama.sh",
       "darwin": "bash ./start_llama.sh",
-      "win32": "cmd /c start /B powershell -File start_llama.ps1"
+      "win32": "powershell -NoProfile -File ./start_llama.ps1"
     },
     "stop": {
       "linux": "pkill -f llama-server",
@@ -71,7 +79,8 @@ Edit `resource-guard-config.json` in the plugin root:
 | `llamaUrl` | Base URL of your `llama-server` (`/slots`, `/health` endpoints) |
 | `localProviderId` | Provider ID in `openclaw.json` that routes to the local GPU |
 | `heavyTools` | Tool names that trigger the VRAM drain |
-| `commands.start` | How to boot the server. **Windows: must use `start /B`** to detach from Node.js |
+| `cwd` | Working directory for the start command (per platform, optional). Use if your script uses relative paths |
+| `commands.start` | How to boot the server. Detachment is handled by the plugin — no `start /B` needed |
 | `commands.stop` | How to kill the server |
 
 ## Testing

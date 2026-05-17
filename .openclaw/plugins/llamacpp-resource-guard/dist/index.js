@@ -43,19 +43,12 @@ function startLLM(command) {
         LOG(`[VRAM] llama-server is already running, skipping start.`);
         return false;
     }
-    let cwd;
-    if (process.platform === "win32") {
-        const parts = command.match(/(?:"[^"]*"|'[^']*'|\S+)/g);
-        if (parts) {
-            for (const part of parts) {
-                const cleaned = part.replace(/^["']|["']$/g, "");
-                if (/\.ps1$/i.test(cleaned)) {
-                    cwd = path.dirname(cleaned);
-                }
-            }
-        }
-    }
-    const child = spawn(command, [], { shell: true, detached: true, stdio: "ignore", cwd });
+    const child = spawn(command, [], {
+        shell: true,
+        detached: true,
+        stdio: "ignore",
+        cwd: CONFIG.cwd?.[process.platform],
+    });
     child.on("error", (err) => {
         LOG(`[VRAM] Failed to spawn llama-server: ${err.message}`);
     });
