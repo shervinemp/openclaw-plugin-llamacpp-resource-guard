@@ -16,6 +16,9 @@
       "minGatewayVersion": "2026.3.24-beta.2"
     }
   },
+  "scripts": {
+    "build": "tsc"
+  },
   "devDependencies": {
     "@types/node": "^25.8.0"
   }

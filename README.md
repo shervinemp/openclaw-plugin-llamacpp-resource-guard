@@ -20,7 +20,7 @@ Five hooks orchestrate the full cycle:
 2. Plugin waits for active generations to finish, saves KV slots, kills the server
 3. Heavy tool runs with VRAM free'd up
 4. Plugin spawns the restart command (detached)
-5. Polls `/health` — if `llama-server` is alive, up to **300s**; if dead, bails after **3 retries**
+5. Polls `/health` — if `llama-server` is alive, up to **60s**; if dead, bails after **5s**
 6. Once healthy, restores saved slots and unpauses local agents
 
 ## Installation
