@@ -37,6 +37,10 @@ async function fetchWithCheck(url, options = {}) {
     return res;
 }
 function startLLM(command) {
+    if (isProcessAlive("llama-server")) {
+        console.log(`[VRAM] llama-server is already running, skipping start.`);
+        return;
+    }
     const child = spawn(command, [], { shell: true, detached: true, stdio: "ignore" });
     child.on("error", (err) => {
         console.error(`[VRAM] Failed to spawn llama-server: ${err.message}`);

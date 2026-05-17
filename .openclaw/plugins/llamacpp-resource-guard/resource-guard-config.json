@@ -6,7 +6,7 @@
     "start": {
       "linux": "bash ./start_llama.sh",
       "darwin": "bash ./start_llama.sh",
-      "win32": "cmd /c start /B powershell -File start_llama.ps1"
+      "win32": "cmd /c start /B /D \"C:\\ai\\qwen3.6\\35b\" powershell -NoProfile -File \"C:\\ai\\qwen3.6\\35b\\run_llamacpp.ps1\""
     },
     "stop": {
       "linux": "pkill -f llama-server",
