@@ -38,8 +38,8 @@ async function fetchWithCheck(url, options = {}) {
 }
 const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
 const LOG = (msg) => fs.appendFileSync(LOG_FILE, msg + "\n");
-function startLLM(command) {
-    if (isProcessAlive("llama-server")) {
+function startLLM(command, force = false) {
+    if (!force && isProcessAlive("llama-server")) {
         LOG(`[VRAM] llama-server is already running, skipping start.`);
         return false;
     }
@@ -165,7 +165,7 @@ export default definePluginEntry({
                 catch { }
             }
             LOG(`[VRAM] Starting llama-server...`);
-            startLLM(CMD_START);
+            startLLM(CMD_START, true);
             for (let i = 0; i < 30; i++) {
                 try {
                     const res = await fetchWithTimeout(`${CONFIG.llamaUrl}/health`, { timeout: 2000 });
