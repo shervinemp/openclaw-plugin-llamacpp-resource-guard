@@ -70,17 +70,20 @@ function startLLM(command) {
         cwd: CONFIG.cwd?.[process.platform],
     });
     serverPid = child.pid;
-    child.on("exit", (code, signal) => {
-        if (stderrFd !== undefined)
+    const closeFd = () => { if (stderrFd !== undefined)
+        try {
             fs.closeSync(stderrFd);
+        }
+        catch { } };
+    child.on("exit", (code, signal) => {
+        closeFd();
         serverPid = undefined;
         if (code !== 0 && code !== null) {
             LOG(`[VRAM] llama-server exited with code ${code} (signal: ${signal}). Check ${SPWN_LOG_FILE} for details.`);
         }
     });
     child.on("error", (err) => {
-        if (stderrFd !== undefined)
-            fs.closeSync(stderrFd);
+        closeFd();
         LOG(`[VRAM] Failed to spawn llama-server: ${err.message}. Check ${SPWN_LOG_FILE} for details.`);
     });
     child.unref();
@@ -198,6 +201,14 @@ export default definePluginEntry({
             LOG(`[VRAM] Gateway stopping. Killing llama-server...`);
             stopServerSync();
         });
+        // Orphan cleanup: if a server was left from a previous hard kill, terminate it
+        if (isProcessAlive("llama-server")) {
+            LOG(`[VRAM] Found orphaned llama-server from previous session, killing it...`);
+            try {
+                execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
+            }
+            catch { }
+        }
         // Clear stale slot files from previous sessions
         try {
             for (const f of fs.readdirSync(SLOTS_DIR)) {
