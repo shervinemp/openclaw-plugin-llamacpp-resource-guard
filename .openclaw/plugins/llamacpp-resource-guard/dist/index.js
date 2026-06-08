@@ -209,6 +209,20 @@ export default definePluginEntry({
             }
             catch { }
         }
+        // Windows watchdog: polls gateway PID every 5s; kills server if parent exits
+        if (process.platform === "win32") {
+            const wdFile = path.join(os.tmpdir(), "llama-watchdog.bat");
+            try {
+                const pid = process.pid;
+                fs.writeFileSync(wdFile, `@echo off\r\n:loop\r\ntasklist /NH /FI "PID eq ${pid}" 2>nul | findstr /C:"${pid}" >nul\r\nif errorlevel 1 (\r\n  taskkill /F /IM llama-server.exe >nul 2>nul\r\n  exit /b\r\n)\r\nping -n 6 127.0.0.1 >nul\r\ngoto loop\r\n`, "utf-8");
+                const wd = spawn("cmd.exe", ["/c", wdFile], { detached: true, stdio: "ignore" });
+                wd.unref();
+                LOG(`[VRAM] Watchdog started (PID ${process.pid} -> ${wdFile}).`);
+            }
+            catch (e) {
+                LOG(`[VRAM] Watchdog failed: ${e.message}`);
+            }
+        }
         // Clear stale slot files from previous sessions
         try {
             for (const f of fs.readdirSync(SLOTS_DIR)) {

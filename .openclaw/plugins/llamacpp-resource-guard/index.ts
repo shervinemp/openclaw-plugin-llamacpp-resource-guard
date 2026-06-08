@@ -245,6 +245,8 @@ export default definePluginEntry({
       } catch {}
     }
 
+
+
     // Clear stale slot files from previous sessions
     try {
       for (const f of fs.readdirSync(SLOTS_DIR)) {
