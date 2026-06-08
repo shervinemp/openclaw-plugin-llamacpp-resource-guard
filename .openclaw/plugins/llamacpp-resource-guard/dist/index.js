@@ -44,15 +44,22 @@ async function fetchWithCheck(url, options = {}) {
     return res;
 }
 const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
+const LOG_VERBOSE = !!process.env.VRAM_VERBOSE;
 const LOG = (msg) => {
     fs.appendFileSync(LOG_FILE, msg + "\n");
-    try {
-        console.log(msg);
-    }
-    catch { }
+    if (LOG_VERBOSE)
+        try {
+            console.log(msg);
+        }
+        catch { }
 };
-let serverPid;
 const SPWN_LOG_FILE = path.join(os.tmpdir(), "vram-spawn-errors.log");
+function spawnWatchdog() {
+    const wdPid = process.pid;
+    const wdFile = path.join(os.tmpdir(), "llama-watchdog.bat");
+    fs.writeFileSync(wdFile, `@echo off\r\n:loop\r\ntasklist /NH /FI "PID eq ${wdPid}" 2>nul | findstr /C:"${wdPid}" >nul\r\nif errorlevel 1 (\r\n  taskkill /F /IM llama-server.exe >nul 2>nul\r\n  exit /b\r\n)\r\ntimeout /t 5 /nobreak >nul\r\ngoto loop\r\n`, "utf-8");
+    spawn("cmd.exe", ["/c", "start", '"llama-watchdog"', "/MIN", "cmd.exe", "/c", wdFile], { detached: true, stdio: "ignore" }).unref();
+}
 function startLLM(command) {
     if (isProcessAlive("llama-server")) {
         LOG(`[VRAM] llama-server is already running, skipping start.`);
@@ -69,7 +76,6 @@ function startLLM(command) {
         stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
         cwd: CONFIG.cwd?.[process.platform],
     });
-    serverPid = child.pid;
     const closeFd = () => { if (stderrFd !== undefined)
         try {
             fs.closeSync(stderrFd);
@@ -77,7 +83,6 @@ function startLLM(command) {
         catch { } };
     child.on("exit", (code, signal) => {
         closeFd();
-        serverPid = undefined;
         if (code !== 0 && code !== null) {
             LOG(`[VRAM] llama-server exited with code ${code} (signal: ${signal}). Check ${SPWN_LOG_FILE} for details.`);
         }
@@ -90,15 +95,6 @@ function startLLM(command) {
     return true;
 }
 function isProcessAlive(processName) {
-    if (serverPid !== undefined) {
-        try {
-            process.kill(serverPid, 0);
-            return true;
-        }
-        catch {
-            serverPid = undefined;
-        }
-    }
     try {
         if (process.platform === "win32") {
             const name = processName.endsWith(".exe") ? processName : `${processName}.exe`;
@@ -206,20 +202,21 @@ export default definePluginEntry({
             execSync('taskkill /F /FI "WINDOWTITLE eq llama-watchdog"', { stdio: "ignore", timeout: 2000 });
         }
         catch { }
+        try {
+            execSync('wmic process where "name=\'cmd.exe\' and commandline like \'%llama-watchdog%\'" delete', { stdio: "ignore", timeout: 2000 });
+        }
+        catch { }
         // Windows watchdog: polls gateway PID every 5s via start /MIN (escapes Job Object)
         if (process.platform === "win32") {
             try {
-                const wdPid = process.pid;
-                const wdFile = path.join(os.tmpdir(), "llama-watchdog.bat");
-                fs.writeFileSync(wdFile, `@echo off\r\n:loop\r\ntasklist /NH /FI "PID eq ${wdPid}" 2>nul | findstr /C:"${wdPid}" >nul\r\nif errorlevel 1 (\r\n  taskkill /F /IM llama-server.exe >nul 2>nul\r\n  exit /b\r\n)\r\ntimeout /t 5 /nobreak >nul\r\ngoto loop\r\n`, "utf-8");
-                spawn("cmd.exe", ["/c", "start", '"llama-watchdog"', "/MIN", "cmd.exe", "/c", wdFile], { detached: true, stdio: "ignore" }).unref();
-                LOG(`[VRAM] Watchdog started for PID ${wdPid}.`);
+                spawnWatchdog();
+                LOG(`[VRAM] Watchdog started for PID ${process.pid}.`);
             }
             catch { }
         }
-        // Orphan cleanup: if a server was left from a previous hard kill, terminate it
+        // Orphan cleanup: kill any leftover server for a fresh start
         if (isProcessAlive("llama-server")) {
-            LOG(`[VRAM] Found orphaned llama-server from previous session, killing it...`);
+            LOG(`[VRAM] Killing leftover llama-server for fresh start...`);
             try {
                 execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
             }
@@ -240,7 +237,7 @@ export default definePluginEntry({
         startLLM(CMD_START);
         (async () => {
             const bootPollStart = Date.now();
-            for (let i = 0; i < 30; i++) {
+            for (let i = 0; i < 60; i++) {
                 try {
                     const res = await fetchWithTimeout(`${CONFIG.llamaUrl}/health`, { timeout: 2000 });
                     if (res.ok) {
@@ -253,7 +250,7 @@ export default definePluginEntry({
             }
             LOG(`[VRAM] WARNING: llama-server not healthy after ${((Date.now() - bootPollStart) / 1000).toFixed(0)}s. Check your start command.`);
         })();
-        // Periodic health check: restart server if it crashes mid-session
+        // Periodic health check: restart server if process died
         setInterval(async () => {
             if (gpuState !== "IDLE")
                 return;
@@ -263,15 +260,9 @@ export default definePluginEntry({
                     return;
             }
             catch { }
-            LOG(`[VRAM] Server unresponsive. Restarting...`);
-            if (isProcessAlive("llama-server")) {
-                try {
-                    execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
-                }
-                catch { }
-            }
-            startLLM(CMD_START);
-        }, 30000);
+            if (!isProcessAlive("llama-server"))
+                startLLM(CMD_START);
+        }, 10000);
         // Track active local generations
         const onModelCallStarted = (event) => {
             if (event.provider === CONFIG.localProviderId) {

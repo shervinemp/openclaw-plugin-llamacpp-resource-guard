@@ -25,9 +25,8 @@ Hooks orchestrate the full cycle:
 4. Plugin spawns the restart command (detached)
 5. Polls `/health` — if `llama-server` is alive, up to **60s**; if dead, bails after **~5s**
 6. Once healthy, restores saved slots and unpauses local agents
-7. **On gateway stop** (Windows): detached watchdog monitors gateway PID, kills `llama-server` within seconds of gateway exit
-8. **On gateway stop** (Linux/macOS): `gateway_stop` hook fires and kills server
-9. **On next start**: any leftover server from a hard kill is cleaned up before starting fresh
+7. **On gateway stop**: `gateway_stop` hook fires (Linux/macOS) or a detached watchdog detects the dead PID and kills the server (Windows)
+8. **On next start**: any leftover server from a hard kill is cleaned up before starting fresh
 
 ## Installation
 
@@ -63,7 +62,7 @@ Edit `resource-guard-config.json` in the plugin root:
     "start": {
       "linux": "bash ./start_llama.sh",
       "darwin": "bash ./start_llama.sh",
-      "win32": "start \"Llama Server\" cmd /c \"cd /d C:\\llama && powershell -NoProfile -File run_llamacpp.ps1\""
+      "win32": "start \"Llama Server\" powershell -NoProfile -File run_llamacpp.ps1"
     },
     "stop": {
       "linux": "pkill -f llama-server",
@@ -79,7 +78,7 @@ Edit `resource-guard-config.json` in the plugin root:
 | `llamaUrl` | Base URL of your `llama-server` (`/slots`, `/health` endpoints) |
 | `localProviderId` | Provider ID in `openclaw.json` that routes to the local GPU |
 | `heavyTools` | Tool names that trigger the VRAM drain |
-| `commands.start` | How to boot the server. Use `start ""` on Windows for a visible window |
+| `commands.start` | How to boot the server. On Windows, use `start ""` for a visible window |
 | `commands.stop` | How to kill the server |
 
 ## Testing
@@ -114,6 +113,7 @@ Get-Content "$env:TEMP\vram-plugin-test.log" -Wait    # PowerShell
     }
   }
   ```
+- **Windows**: Add `Set-Location $PSScriptRoot` at the top of your PowerShell start script so it resolves relative paths from its own directory. This keeps the `commands.start` command simple — no `cd /d` or `/D` needed.
 - Config is read once at module load. Changes to `resource-guard-config.json` need `openclaw gateway restart`.
 - **KV slot save/restore** is optional. Without `--slot-save-path` on `llama-server`, the save endpoint returns 501 and the plugin skips it. With the flag:
   ```
