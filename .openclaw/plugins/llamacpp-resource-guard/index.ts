@@ -84,27 +84,26 @@ function startLLM(command: string): boolean {
     return false;
   }
 
-  let stderrStream: fs.WriteStream | undefined;
+  let stderrFd: number | undefined;
   try {
-    stderrStream = fs.createWriteStream(SPWN_LOG_FILE, { flags: "a" });
-    stderrStream.on("error", () => {});
+    stderrFd = fs.openSync(SPWN_LOG_FILE, "a");
   } catch {}
   const child = spawn(command, [], {
     shell: true,
     detached: true,
-    stdio: ["ignore", "ignore", stderrStream ?? "ignore"],
+    stdio: ["ignore", "ignore", stderrFd ?? "ignore"],
     cwd: CONFIG.cwd?.[process.platform],
   });
   serverPid = child.pid;
   child.on("exit", (code, signal) => {
-    if (stderrStream) stderrStream.end();
+    if (stderrFd !== undefined) fs.closeSync(stderrFd);
     serverPid = undefined;
     if (code !== 0 && code !== null) {
       LOG(`[VRAM] llama-server exited with code ${code} (signal: ${signal}). Check ${SPWN_LOG_FILE} for details.`);
     }
   });
   child.on("error", (err: Error) => {
-    if (stderrStream) stderrStream.end();
+    if (stderrFd !== undefined) fs.closeSync(stderrFd);
     LOG(`[VRAM] Failed to spawn llama-server: ${err.message}. Check ${SPWN_LOG_FILE} for details.`);
   });
   child.unref();
@@ -229,20 +228,13 @@ export default definePluginEntry({
       } catch {}
     };
 
-    const stopServer = async () => {
-      LOG(`[VRAM] OpenClaw shutting down. Killing llama-server...`);
-      try {
-        await execAsync(CMD_STOP, { timeout: 5000 });
-        LOG(`[VRAM] llama-server stopped successfully.`);
-      } catch (e: any) {
-        LOG(`[VRAM] Stop command result: ${e.message}`);
-      }
-    };
-
-    process.on("SIGINT", () => { stopServerSync(); process.exit(0); });
-    process.on("SIGTERM", () => { stopServerSync(); process.exit(0); });
+    process.on("SIGINT", () => { LOG(`[VRAM] SIGINT received.`); stopServerSync(); process.exit(0); });
+    process.on("SIGTERM", () => { LOG(`[VRAM] SIGTERM received.`); stopServerSync(); process.exit(0); });
     process.on("exit", stopServerSync);
-    api.on("gateway_stop", stopServer);
+    api.on("gateway_stop", () => {
+      LOG(`[VRAM] Gateway stopping. Killing llama-server...`);
+      stopServerSync();
+    });
 
     // Clear stale slot files from previous sessions
     try {
