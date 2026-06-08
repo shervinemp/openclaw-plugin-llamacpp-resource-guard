@@ -201,22 +201,27 @@ export default definePluginEntry({
             LOG(`[VRAM] Gateway stopping. Killing llama-server...`);
             stopServer();
         });
-        // Orphan cleanup: if a server was left from a previous hard kill, terminate it
-        if (isProcessAlive("llama-server")) {
-            LOG(`[VRAM] Found orphaned llama-server from previous session, killing it...`);
-            try {
-                execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
-            }
-            catch { }
+        // Kill any old watchdog from a previous session (would kill our new server)
+        try {
+            execSync('taskkill /F /FI "WINDOWTITLE eq llama-watchdog"', { stdio: "ignore", timeout: 2000 });
         }
+        catch { }
         // Windows watchdog: polls gateway PID every 5s via start /MIN (escapes Job Object)
         if (process.platform === "win32") {
             try {
                 const wdPid = process.pid;
                 const wdFile = path.join(os.tmpdir(), "llama-watchdog.bat");
                 fs.writeFileSync(wdFile, `@echo off\r\n:loop\r\ntasklist /NH /FI "PID eq ${wdPid}" 2>nul | findstr /C:"${wdPid}" >nul\r\nif errorlevel 1 (\r\n  taskkill /F /IM llama-server.exe >nul 2>nul\r\n  exit /b\r\n)\r\nping -n 6 127.0.0.1 >nul\r\ngoto loop\r\n`, "utf-8");
-                spawn("cmd.exe", ["/c", "start", "/MIN", "cmd.exe", "/c", wdFile], { shell: true, detached: true, stdio: "ignore" }).unref();
+                spawn("cmd.exe", ["/c", "start", "llama-watchdog", "/MIN", "cmd.exe", "/c", wdFile], { shell: true, detached: true, stdio: "ignore" }).unref();
                 LOG(`[VRAM] Watchdog started for PID ${wdPid}.`);
+            }
+            catch { }
+        }
+        // Orphan cleanup: if a server was left from a previous hard kill, terminate it
+        if (isProcessAlive("llama-server")) {
+            LOG(`[VRAM] Found orphaned llama-server from previous session, killing it...`);
+            try {
+                execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
             }
             catch { }
         }
