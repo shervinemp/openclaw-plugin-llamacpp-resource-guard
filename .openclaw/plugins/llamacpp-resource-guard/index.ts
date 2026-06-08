@@ -220,21 +220,21 @@ export default definePluginEntry({
   register(api) {
     // Shutdown: sync for process signals (can't await), async for gateway_stop
     let serverStopped = false;
-    const stopServerSync = () => {
+    const stopServer = () => {
       if (serverStopped) return;
       serverStopped = true;
+      LOG(`[VRAM] Killing llama-server...`);
       try {
-        execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
-        LOG(`[VRAM] llama-server stopped.`);
+        spawn(CMD_STOP, [], { shell: true, detached: true, stdio: "ignore" }).unref();
       } catch {}
     };
 
-    process.on("SIGINT", () => { LOG(`[VRAM] SIGINT received.`); stopServerSync(); process.exit(0); });
-    process.on("SIGTERM", () => { LOG(`[VRAM] SIGTERM received.`); stopServerSync(); process.exit(0); });
-    process.on("exit", stopServerSync);
+    process.on("SIGINT", () => { LOG(`[VRAM] SIGINT received.`); stopServer(); process.exit(0); });
+    process.on("SIGTERM", () => { LOG(`[VRAM] SIGTERM received.`); stopServer(); process.exit(0); });
+    process.on("exit", stopServer);
     api.on("gateway_stop", () => {
       LOG(`[VRAM] Gateway stopping. Killing llama-server...`);
-      stopServerSync();
+      stopServer();
     });
 
     // Orphan cleanup: if a server was left from a previous hard kill, terminate it
