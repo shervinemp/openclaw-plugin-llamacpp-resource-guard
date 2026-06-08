@@ -243,7 +243,8 @@ export default definePluginEntry({
     }
 
     // Orphan cleanup: kill any leftover server for a fresh start
-    if (isProcessAlive("llama-server")) {
+    const hadOrphan = isProcessAlive("llama-server");
+    if (hadOrphan) {
       LOG(`[VRAM] Killing leftover llama-server for fresh start...`);
       try { execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 }); } catch {}
     }
@@ -258,9 +259,9 @@ export default definePluginEntry({
     // Validate config: log provider ID at startup so misconfiguration is visible
     LOG(`[VRAM] Config: provider="${CONFIG.localProviderId}"  url="${CONFIG.llamaUrl}"  tools=${JSON.stringify(CONFIG.heavyTools)}`);
 
-    // Start server (spawn checks if already running)
-    LOG(`[VRAM] Starting llama-server...`);
-    startLLM(CMD_START);
+    // Start server — defer if we just killed an orphan (let process table settle)
+    const startSrv = () => { LOG(`[VRAM] Starting llama-server...`); startLLM(CMD_START); };
+    if (hadOrphan) setTimeout(startSrv, 500); else startSrv();
     (async () => {
       const bootPollStart = Date.now();
       for (let i = 0; i < 60; i++) {
