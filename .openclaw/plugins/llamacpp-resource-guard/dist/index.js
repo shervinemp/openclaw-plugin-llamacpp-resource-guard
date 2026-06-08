@@ -253,6 +253,25 @@ export default definePluginEntry({
             }
             LOG(`[VRAM] WARNING: llama-server not healthy after ${((Date.now() - bootPollStart) / 1000).toFixed(0)}s. Check your start command.`);
         })();
+        // Periodic health check: restart server if it crashes mid-session
+        setInterval(async () => {
+            if (gpuState !== "IDLE")
+                return;
+            try {
+                const res = await fetchWithTimeout(`${CONFIG.llamaUrl}/health`, { timeout: 2000 });
+                if (res.ok)
+                    return;
+            }
+            catch { }
+            LOG(`[VRAM] Server unresponsive. Restarting...`);
+            if (isProcessAlive("llama-server")) {
+                try {
+                    execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
+                }
+                catch { }
+            }
+            startLLM(CMD_START);
+        }, 30000);
         // Track active local generations
         const onModelCallStarted = (event) => {
             if (event.provider === CONFIG.localProviderId) {
