@@ -63,7 +63,7 @@ Edit `resource-guard-config.json` in the plugin root:
     "start": {
       "linux": "bash ./start_llama.sh",
       "darwin": "bash ./start_llama.sh",
-      "win32": "powershell -NoProfile -File ./start_llama.ps1"
+      "win32": "powershell -NoProfile -Command \"cd C:\\llama; & '.\\run_llamacpp.ps1'\""
     },
     "stop": {
       "linux": "pkill -f llama-server",
