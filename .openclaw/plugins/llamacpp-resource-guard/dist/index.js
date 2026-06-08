@@ -211,7 +211,7 @@ export default definePluginEntry({
             try {
                 const wdPid = process.pid;
                 const wdFile = path.join(os.tmpdir(), "llama-watchdog.bat");
-                fs.writeFileSync(wdFile, `@echo off\r\n:loop\r\ntasklist /NH /FI "PID eq ${wdPid}" 2>nul | findstr /C:"${wdPid}" >nul\r\nif errorlevel 1 (\r\n  taskkill /F /IM llama-server.exe >nul 2>nul\r\n  exit /b\r\n)\r\nping -n 6 127.0.0.1 >nul\r\ngoto loop\r\n`, "utf-8");
+                fs.writeFileSync(wdFile, `@echo off\r\n:loop\r\ntasklist /NH /FI "PID eq ${wdPid}" 2>nul | findstr /C:"${wdPid}" >nul\r\nif errorlevel 1 (\r\n  taskkill /F /IM llama-server.exe >nul 2>nul\r\n  exit /b\r\n)\r\ntimeout /t 5 /nobreak >nul\r\ngoto loop\r\n`, "utf-8");
                 spawn("cmd.exe", ["/c", "start", "llama-watchdog", "/MIN", "cmd.exe", "/c", wdFile], { shell: true, detached: true, stdio: "ignore" }).unref();
                 LOG(`[VRAM] Watchdog started for PID ${wdPid}.`);
             }
@@ -400,7 +400,7 @@ export default definePluginEntry({
             const executionId = event.toolCallId || ctx.toolCallId;
             const lockKey = (executionId && activeToolLocks.has(executionId))
                 ? executionId
-                : [...activeSlotIds.keys()].find(k => activeToolLocks.has(k)) ?? "";
+                : [...activeSlotIds.keys()].find(k => activeToolLocks.has(k)) ?? "__fallback__";
             const slotIds = activeSlotIds.get(lockKey) ?? [];
             LOG(`[VRAM] Tool finished. Rebooting local LLM...`);
             if (startLLM(CMD_START)) {
