@@ -33,8 +33,11 @@ class FetchError extends Error {
     super(message);
     this.name = "FetchError";
     this.statusCode = statusCode;
+    if (Error.captureStackTrace) Error.captureStackTrace(this, FetchError);
   }
 }
+
+const DEFAULT_HEADERS = { "Accept": "application/json" };
 
 async function fetchWithTimeout(
   url: string,
@@ -44,7 +47,11 @@ async function fetchWithTimeout(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    return await fetch(url, { ...fetchOptions, signal: controller.signal });
+    return await fetch(url, {
+      ...fetchOptions,
+      headers: { ...DEFAULT_HEADERS, ...fetchOptions.headers },
+      signal: controller.signal,
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -62,7 +69,10 @@ async function fetchWithCheck(
 }
 
 const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
-const LOG = (msg: string) => fs.appendFileSync(LOG_FILE, msg + "\n");
+const LOG = (msg: string) => {
+  fs.appendFileSync(LOG_FILE, msg + "\n");
+  try { console.log(msg); } catch {}
+};
 
 let serverPid: number | undefined;
 
@@ -74,22 +84,27 @@ function startLLM(command: string): boolean {
     return false;
   }
 
-  const stderrStream = fs.createWriteStream(SPWN_LOG_FILE, { flags: "a" });
+  let stderrStream: fs.WriteStream | undefined;
+  try {
+    stderrStream = fs.createWriteStream(SPWN_LOG_FILE, { flags: "a" });
+    stderrStream.on("error", () => {});
+  } catch {}
   const child = spawn(command, [], {
     shell: true,
     detached: true,
-    stdio: ["ignore", "ignore", stderrStream],
+    stdio: ["ignore", "ignore", stderrStream ?? "ignore"],
     cwd: CONFIG.cwd?.[process.platform],
   });
   serverPid = child.pid;
   child.on("exit", (code, signal) => {
-    stderrStream.end();
+    if (stderrStream) stderrStream.end();
     serverPid = undefined;
     if (code !== 0 && code !== null) {
       LOG(`[VRAM] llama-server exited with code ${code} (signal: ${signal}). Check ${SPWN_LOG_FILE} for details.`);
     }
   });
   child.on("error", (err: Error) => {
+    if (stderrStream) stderrStream.end();
     LOG(`[VRAM] Failed to spawn llama-server: ${err.message}. Check ${SPWN_LOG_FILE} for details.`);
   });
   child.unref();
@@ -146,21 +161,13 @@ async function acquireMutexWithTimeout(
   mutex: Mutex,
   timeoutMs: number
 ): Promise<() => void> {
-  return new Promise<() => void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Mutex acquire timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    mutex
-      .acquire()
-      .then((release) => {
-        clearTimeout(timer);
-        resolve(release);
-      })
-      .catch((err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Mutex acquire timed out after ${timeoutMs}ms`)), timeoutMs);
   });
+  const release = await Promise.race([mutex.acquire(), timeout]);
+  clearTimeout(timer!);
+  return release;
 }
 
 // --- Load config once at startup ---
@@ -178,11 +185,22 @@ const CMD_STOP = resolvePlatformCommand(CONFIG.commands.stop);
 // --- State ---
 
 let gpuState: "IDLE" | "DRAINING" | "LOCKED" = "IDLE";
+function setGpuState(state: typeof gpuState): void {
+  const valid =
+    (gpuState === "IDLE" && state === "DRAINING") ||
+    (gpuState === "DRAINING" && state === "LOCKED") ||
+    (gpuState === "LOCKED" && state === "IDLE");
+  if (!valid) {
+    LOG(`[VRAM] WARNING: Unexpected GPU state transition: ${gpuState} -> ${state}`);
+  }
+  gpuState = state;
+}
+
 let activeLocalGenerations = 0;
-let savedSlotIds: number[] = [];
 
 const orchestrationMutex = new Mutex();
 const activeToolLocks = new Map<string, () => void>();
+const activeSlotIds = new Map<string, number[]>();
 
 const MUTEX_TIMEOUT = 120_000; // max time a tool can hold the mutex (watchdog)
 const GENERATION_DRAIN_TIMEOUT = 60_000; // max time to wait for generations to finish
@@ -201,7 +219,10 @@ export default definePluginEntry({
   },
   register(api) {
     // Shutdown: sync for process signals (can't await), async for gateway_stop
+    let serverStopped = false;
     const stopServerSync = () => {
+      if (serverStopped) return;
+      serverStopped = true;
       try {
         execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
         LOG(`[VRAM] llama-server stopped.`);
@@ -223,6 +244,13 @@ export default definePluginEntry({
     process.on("exit", stopServerSync);
     api.on("gateway_stop", stopServer);
 
+    // Clear stale slot files from previous sessions
+    try {
+      for (const f of fs.readdirSync(SLOTS_DIR)) {
+        if (f.endsWith(".bin")) fs.unlinkSync(path.join(SLOTS_DIR, f));
+      }
+    } catch {}
+
     // Validate config: log provider ID at startup so misconfiguration is visible
     LOG(`[VRAM] Config: provider="${CONFIG.localProviderId}"  url="${CONFIG.llamaUrl}"  tools=${JSON.stringify(CONFIG.heavyTools)}`);
 
@@ -230,17 +258,18 @@ export default definePluginEntry({
     LOG(`[VRAM] Starting llama-server...`);
     startLLM(CMD_START);
     (async () => {
+      const bootPollStart = Date.now();
       for (let i = 0; i < 30; i++) {
         try {
           const res = await fetchWithTimeout(`${CONFIG.llamaUrl}/health`, { timeout: 2000 });
           if (res.ok) {
-            LOG(`[VRAM] llama-server is healthy after ${i + 1}s.`);
+            LOG(`[VRAM] llama-server is healthy after ${((Date.now() - bootPollStart) / 1000).toFixed(1)}s.`);
             return;
           }
         } catch {}
-        await sleep(1000);
+        await sleep(Math.min(100 * Math.pow(2, i), 1000));
       }
-      LOG(`[VRAM] WARNING: llama-server not healthy after 30s. Check your start command.`);
+      LOG(`[VRAM] WARNING: llama-server not healthy after ${((Date.now() - bootPollStart) / 1000).toFixed(0)}s. Check your start command.`);
     })();
 
     // Track active local generations
@@ -307,7 +336,7 @@ export default definePluginEntry({
             mutexReleased = true;
             releaseMutex();
             activeToolLocks.delete(lockKey);
-            gpuState = "IDLE";
+            setGpuState("IDLE");
             LOG(`[VRAM] MUTEX WATCHDOG: Force-released lock after ${MUTEX_TIMEOUT / 1000}s. GPU state reset to IDLE.`);
           }
         }, MUTEX_TIMEOUT);
@@ -324,13 +353,13 @@ export default definePluginEntry({
         const executionId = event.toolCallId || ctx.toolCallId;
         const lockKey = executionId || "__fallback__";
 
-        // If a stale lock exists for this key (e.g. watchdog already freed a previous one), replace it
         activeToolLocks.set(lockKey, buildRelease);
+        activeSlotIds.set(lockKey, []);
 
         LOG(
           `[VRAM] Heavy tool queued. State -> DRAINING. activeLocalGenerations=${activeLocalGenerations}`
         );
-        gpuState = "DRAINING";
+        setGpuState("DRAINING");
 
         // Wait for active generations, with a safety timeout
         const drainDeadline = Date.now() + GENERATION_DRAIN_TIMEOUT;
@@ -344,41 +373,59 @@ export default definePluginEntry({
           await sleep(100);
         }
 
-        gpuState = "LOCKED";
+        setGpuState("LOCKED");
         LOG(`[VRAM] GPU drained. State -> LOCKED. Saving active context slots...`);
 
         // Save active slots
         try {
           const res = await fetchWithTimeout(`${CONFIG.llamaUrl}/slots`, { timeout: 5000 });
-          if (res.ok) {
+          if (res.status === 501) {
+            LOG(`[VRAM] Llama server returned 501 for /slots (requires --slot-save-path). Skipping save.`);
+          } else if (res.ok) {
             const slots: any[] = await res.json();
-            savedSlotIds = [];
-            for (const slot of slots) {
-              if (typeof slot.id !== "number") {
-                LOG(
-                  `[VRAM] Warning: slot has non-numeric id (${JSON.stringify(slot.id)}), skipping.`
-                );
-                continue;
-              }
-              const tokenCount = slot.next_token?.n_decoded || slot.n_past || 0;
-              if (tokenCount > 0) {
-                const filepath = path.join(SLOTS_DIR, `slot_${slot.id}.bin`);
-                LOG(`[VRAM] Saving Slot ${slot.id} (${tokenCount} tokens)...`);
-                try {
-                  await fetchWithCheck(
-                    `${CONFIG.llamaUrl}/slots/${slot.id}?action=save&filepath=${encodeURIComponent(filepath)}`,
-                    { method: "POST", timeout: 10000 }
-                  );
-                  savedSlotIds.push(slot.id);
-                } catch (saveErr: any) {
-                  LOG(`[VRAM] Failed to save Slot ${slot.id}: ${saveErr.message}`);
+            if (!Array.isArray(slots)) {
+              LOG(`[VRAM] Warning: /slots returned unexpected format. Skipping save.`);
+            } else {
+              const savePromises: Promise<void>[] = [];
+              for (const slot of slots) {
+                if (typeof slot.id !== "number") {
+                  LOG(`[VRAM] Warning: slot has non-numeric id (${JSON.stringify(slot.id)}), skipping.`);
+                  continue;
                 }
+                const tokenCount = slot.next_token?.n_decoded || slot.n_past || 0;
+                if (tokenCount > 0) {
+                  const filepath = path.join(SLOTS_DIR, `slot_${slot.id}.bin`);
+                  savePromises.push(
+                    (async () => {
+                      try {
+                        await fetchWithCheck(
+                          `${CONFIG.llamaUrl}/slots/${slot.id}?action=save&filepath=${encodeURIComponent(filepath)}`,
+                          { method: "POST", timeout: 10000 }
+                        );
+                        activeSlotIds.get(lockKey)?.push(slot.id);
+                      } catch (saveErr: any) {
+                        if (saveErr instanceof FetchError && saveErr.statusCode === 501) {
+                          LOG(`[VRAM] Save not supported for Slot ${slot.id} (requires --slot-save-path on llama-server).`);
+                        } else {
+                          LOG(`[VRAM] Failed to save Slot ${slot.id}: ${saveErr.message}`);
+                        }
+                      }
+                    })()
+                  );
+                }
+              }
+              if (savePromises.length > 0) {
+                LOG(`[VRAM] Saving ${savePromises.length} slot(s) in parallel...`);
+                await Promise.allSettled(savePromises);
               }
             }
           }
         } catch (e: any) {
           LOG(`[VRAM] Warning: Could not reach Llama server to list slots: ${e.message}`);
         }
+
+        // Brief debounce so in-flight slot writes finish before kill
+        await sleep(500);
 
         // Kill local LLM
         LOG(`[VRAM] Killing local LLM process...`);
@@ -398,19 +445,28 @@ export default definePluginEntry({
       async (event: any, ctx: any) => {
         if (!CONFIG.heavyTools.includes(event.toolName)) return;
 
+        // Resolve lock key early so we can look up per-invocation slot IDs
+        const executionId = event.toolCallId || ctx.toolCallId;
+        const lockKey =
+          (executionId && activeToolLocks.has(executionId))
+            ? executionId
+            : [...activeSlotIds.keys()].find(k => activeToolLocks.has(k)) ?? "";
+        const slotIds = activeSlotIds.get(lockKey) ?? [];
+
         LOG(`[VRAM] Tool finished. Rebooting local LLM...`);
         if (startLLM(CMD_START)) {
           LOG(`[VRAM] Start command issued.`);
         }
 
         const MAX_POLL = 60;
-        const MAX_POLL_WITHOUT_PROCESS = 5;
+        const MAX_POLL_WITHOUT_PROCESS = 8;
         let isHealthy = false;
         let bailedEarly = false;
+        const pollStart = Date.now();
 
         for (let i = 0; i < MAX_POLL; i++) {
           if (!isProcessAlive("llama-server") && i >= MAX_POLL_WITHOUT_PROCESS) {
-            LOG(`[VRAM] llama-server process not found after ${i + 1}s, aborting poll.`);
+            LOG(`[VRAM] llama-server process not found after ${((Date.now() - pollStart) / 1000).toFixed(1)}s, aborting poll.`);
             bailedEarly = true;
             break;
           }
@@ -420,23 +476,21 @@ export default definePluginEntry({
               isHealthy = true;
               break;
             }
-          } catch {
-            // not healthy yet
-          }
-          await sleep(1000);
+          } catch {}
+          await sleep(Math.min(100 * Math.pow(2, i), 1000));
         }
 
         if (!isHealthy) {
           if (bailedEarly) {
-            LOG(`[VRAM] CRITICAL: llama-server process not running after ${MAX_POLL_WITHOUT_PROCESS}s.`);
+            LOG(`[VRAM] CRITICAL: llama-server process not running.`);
           } else {
-            LOG(`[VRAM] CRITICAL: llama-server failed to become healthy within ${MAX_POLL}s.`);
+            LOG(`[VRAM] CRITICAL: llama-server failed to become healthy within ${((Date.now() - pollStart) / 1000).toFixed(0)}s.`);
           }
         } else {
           LOG(`[VRAM] LLM online (healthy).`);
-          if (savedSlotIds.length > 0) {
-            LOG(`[VRAM] Restoring ${savedSlotIds.length} context slots...`);
-            for (const id of savedSlotIds) {
+          if (slotIds.length > 0) {
+            LOG(`[VRAM] Restoring ${slotIds.length} context slots...`);
+            for (const id of slotIds) {
               const filepath = path.join(SLOTS_DIR, `slot_${id}.bin`);
               try {
                 await fetchWithCheck(
@@ -444,6 +498,7 @@ export default definePluginEntry({
                   { method: "POST", timeout: 10000 }
                 );
                 LOG(`[VRAM] Restored Slot ${id}`);
+                fs.unlink(filepath, () => {});
               } catch (e: any) {
                 LOG(`[VRAM] Failed to restore Slot ${id}: ${e.message}`);
               }
@@ -451,20 +506,18 @@ export default definePluginEntry({
           }
         }
 
-        gpuState = "IDLE";
-        savedSlotIds = [];
+        setGpuState("IDLE");
 
-        // Release the mutex lock for this tool
-        const executionId = event.toolCallId || ctx.toolCallId;
-        const lockKey =
-          (executionId && activeToolLocks.has(executionId)) ? executionId : "__fallback__";
+        // Release the mutex and clean up per-invocation state
         if (activeToolLocks.has(lockKey)) {
           const releaseFn = activeToolLocks.get(lockKey)!;
           releaseFn();
           activeToolLocks.delete(lockKey);
+          activeSlotIds.delete(lockKey);
         }
         if (executionId && lockKey !== executionId && activeToolLocks.has(executionId)) {
           activeToolLocks.delete(executionId);
+          activeSlotIds.delete(executionId);
         }
 
         LOG(`[VRAM] Swap complete. Local agents unpaused. state=IDLE`);
