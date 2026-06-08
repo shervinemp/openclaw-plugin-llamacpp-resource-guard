@@ -13,18 +13,21 @@ Hooks orchestrate the full cycle:
 | `before_model_resolve` | Gates new local calls during an active drain |
 | `before_tool_call` | Drains GPU, saves KV slots, kills `llama-server` |
 | `after_tool_call` | Restarts `llama-server`, polls health, restores slots |
-| `gateway_stop` | Kills `llama-server` on gateway shutdown |
+| `gateway_stop` | Best-effort kill on graceful shutdown |
+| `SIGINT`/`SIGTERM`/`exit` | Best-effort kill on signal |
 
 **Cycle:**
 
-0. **On gateway start**, plugin spawns `llama-server` (or reuses an existing healthy one)
+0. **On gateway start**, plugin kills any orphan from a previous hard kill, then spawns `llama-server`
 1. Agent calls a tool in `heavyTools`
 2. Plugin waits for active generations to finish, saves KV slots, kills the server
 3. Heavy tool runs with VRAM free'd up
 4. Plugin spawns the restart command (detached)
-5. Polls `/health` — if `llama-server` is alive, up to **60s**; if dead, bails after **5s**
+5. Polls `/health` — if `llama-server` is alive, up to **60s**; if dead, bails after **~5s**
 6. Once healthy, restores saved slots and unpauses local agents
-7. **On gateway stop**, plugin kills `llama-server`
+7. **On gateway stop** (Windows): detached watchdog monitors gateway PID, kills `llama-server` within seconds of gateway exit
+8. **On gateway stop** (Linux/macOS): `gateway_stop` hook fires and kills server
+9. **On next start**: any leftover server from a hard kill is cleaned up before starting fresh
 
 ## Installation
 
@@ -56,14 +59,11 @@ Edit `resource-guard-config.json` in the plugin root:
   "llamaUrl": "http://127.0.0.1:9000",
   "localProviderId": "local-ai",
   "heavyTools": ["generate_video", "generate_image"],
-  "cwd": {
-    "win32": "C:\\llama"
-  },
   "commands": {
     "start": {
       "linux": "bash ./start_llama.sh",
       "darwin": "bash ./start_llama.sh",
-      "win32": "powershell -NoProfile -Command \"cd C:\\llama; & '.\\run_llamacpp.ps1'\""
+      "win32": "start \"Llama Server\" cmd /c \"cd /d C:\\llama && powershell -NoProfile -File run_llamacpp.ps1\""
     },
     "stop": {
       "linux": "pkill -f llama-server",
@@ -79,17 +79,21 @@ Edit `resource-guard-config.json` in the plugin root:
 | `llamaUrl` | Base URL of your `llama-server` (`/slots`, `/health` endpoints) |
 | `localProviderId` | Provider ID in `openclaw.json` that routes to the local GPU |
 | `heavyTools` | Tool names that trigger the VRAM drain |
-| `cwd` | Working directory for the start command (per platform, optional). Use if your script uses relative paths |
-| `commands.start` | How to boot the server. Detachment is handled by the plugin — no `start /B` needed |
+| `commands.start` | How to boot the server. Use `start ""` on Windows for a visible window |
 | `commands.stop` | How to kill the server |
 
 ## Testing
 
 Add a tool to `heavyTools` and ask the agent to use it. The plugin logs every state transition.
 
-### Diagnostic Log
+### Diagnostic Logs
 
-A trace is written to `$TMPDIR/vram-plugin-test.log`. Watch it during testing:
+| Log | Path | Purpose |
+|-----|------|---------|
+| Plugin trace | `$TMPDIR/vram-plugin-test.log` | All state transitions, health polls, errors |
+| Spawn stderr | `$TMPDIR/vram-spawn-errors.log` | Stderr from `llama-server` process (startup crashes, CUDA errors) |
+
+Watch the plugin trace during testing:
 
 ```bash
 tail -f /tmp/vram-plugin-test.log                    # Linux/macOS
