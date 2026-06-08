@@ -38,24 +38,44 @@ async function fetchWithCheck(url, options = {}) {
 }
 const LOG_FILE = path.join(os.tmpdir(), "vram-plugin-test.log");
 const LOG = (msg) => fs.appendFileSync(LOG_FILE, msg + "\n");
+let serverPid;
+const SPWN_LOG_FILE = path.join(os.tmpdir(), "vram-spawn-errors.log");
 function startLLM(command) {
     if (isProcessAlive("llama-server")) {
         LOG(`[VRAM] llama-server is already running, skipping start.`);
         return false;
     }
+    const stderrStream = fs.createWriteStream(SPWN_LOG_FILE, { flags: "a" });
     const child = spawn(command, [], {
         shell: true,
         detached: true,
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", stderrStream],
         cwd: CONFIG.cwd?.[process.platform],
     });
+    serverPid = child.pid;
+    child.on("exit", (code, signal) => {
+        stderrStream.end();
+        serverPid = undefined;
+        if (code !== 0 && code !== null) {
+            LOG(`[VRAM] llama-server exited with code ${code} (signal: ${signal}). Check ${SPWN_LOG_FILE} for details.`);
+        }
+    });
     child.on("error", (err) => {
-        LOG(`[VRAM] Failed to spawn llama-server: ${err.message}`);
+        LOG(`[VRAM] Failed to spawn llama-server: ${err.message}. Check ${SPWN_LOG_FILE} for details.`);
     });
     child.unref();
     return true;
 }
 function isProcessAlive(processName) {
+    if (serverPid !== undefined) {
+        try {
+            process.kill(serverPid, 0);
+            return true;
+        }
+        catch {
+            serverPid = undefined;
+        }
+    }
     try {
         if (process.platform === "win32") {
             const name = processName.endsWith(".exe") ? processName : `${processName}.exe`;
@@ -138,16 +158,30 @@ export default definePluginEntry({
         properties: {},
     },
     register(api) {
-        const shutdownModel = () => {
-            LOG(`[VRAM] OpenClaw shutting down. Killing llama-server...`);
+        // Shutdown: sync for process signals (can't await), async for gateway_stop
+        const stopServerSync = () => {
             try {
                 execSync(CMD_STOP, { stdio: "ignore", timeout: 5000 });
+                LOG(`[VRAM] llama-server stopped.`);
+            }
+            catch { }
+        };
+        const stopServer = async () => {
+            LOG(`[VRAM] OpenClaw shutting down. Killing llama-server...`);
+            try {
+                await execAsync(CMD_STOP, { timeout: 5000 });
                 LOG(`[VRAM] llama-server stopped successfully.`);
             }
             catch (e) {
-                LOG(`[VRAM] Stop command result on exit: ${e.message}`);
+                LOG(`[VRAM] Stop command result: ${e.message}`);
             }
         };
+        process.on("SIGINT", () => { stopServerSync(); process.exit(0); });
+        process.on("SIGTERM", () => { stopServerSync(); process.exit(0); });
+        process.on("exit", stopServerSync);
+        api.on("gateway_stop", stopServer);
+        // Validate config: log provider ID at startup so misconfiguration is visible
+        LOG(`[VRAM] Config: provider="${CONFIG.localProviderId}"  url="${CONFIG.llamaUrl}"  tools=${JSON.stringify(CONFIG.heavyTools)}`);
         // Start server (spawn checks if already running)
         LOG(`[VRAM] Starting llama-server...`);
         startLLM(CMD_START);
@@ -165,11 +199,6 @@ export default definePluginEntry({
             }
             LOG(`[VRAM] WARNING: llama-server not healthy after 30s. Check your start command.`);
         })();
-        // Clean shutdown
-        process.on("exit", shutdownModel);
-        api.on("gateway_stop", async () => {
-            shutdownModel();
-        });
         // Track active local generations
         const onModelCallStarted = (event) => {
             if (event.provider === CONFIG.localProviderId) {
@@ -191,7 +220,12 @@ export default definePluginEntry({
                 return;
             if (gpuState !== "IDLE") {
                 LOG(`[VRAM] Gatekeeper paused run ${ctx.runId ?? "(unknown)"}. Waiting for GPU...`);
+                const deadline = Date.now() + GENERATION_DRAIN_TIMEOUT;
                 while (gpuState !== "IDLE") {
+                    if (Date.now() > deadline) {
+                        LOG(`[VRAM] Gatekeeper timed out waiting for GPU. Allowing run anyway.`);
+                        break;
+                    }
                     await sleep(100);
                 }
             }
@@ -215,7 +249,9 @@ export default definePluginEntry({
                 if (!mutexReleased) {
                     mutexReleased = true;
                     releaseMutex();
-                    LOG(`[VRAM] MUTEX WATCHDOG: Released mutex after ${MUTEX_TIMEOUT / 1000}s timeout.`);
+                    activeToolLocks.delete(lockKey);
+                    gpuState = "IDLE";
+                    LOG(`[VRAM] MUTEX WATCHDOG: Force-released lock after ${MUTEX_TIMEOUT / 1000}s. GPU state reset to IDLE.`);
                 }
             }, MUTEX_TIMEOUT);
             const buildRelease = () => {
