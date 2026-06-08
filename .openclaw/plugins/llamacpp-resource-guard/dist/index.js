@@ -212,7 +212,7 @@ export default definePluginEntry({
                 const wdPid = process.pid;
                 const wdFile = path.join(os.tmpdir(), "llama-watchdog.bat");
                 fs.writeFileSync(wdFile, `@echo off\r\n:loop\r\ntasklist /NH /FI "PID eq ${wdPid}" 2>nul | findstr /C:"${wdPid}" >nul\r\nif errorlevel 1 (\r\n  taskkill /F /IM llama-server.exe >nul 2>nul\r\n  exit /b\r\n)\r\ntimeout /t 5 /nobreak >nul\r\ngoto loop\r\n`, "utf-8");
-                spawn("cmd.exe", ["/c", "start", "llama-watchdog", "/MIN", "cmd.exe", "/c", wdFile], { shell: true, detached: true, stdio: "ignore" }).unref();
+                spawn("cmd.exe", ["/c", "start", "llama-watchdog", "/MIN", "cmd.exe", "/c", wdFile], { detached: true, stdio: "ignore" }).unref();
                 LOG(`[VRAM] Watchdog started for PID ${wdPid}.`);
             }
             catch { }
